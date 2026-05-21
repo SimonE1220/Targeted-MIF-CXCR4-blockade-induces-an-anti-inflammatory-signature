@@ -1,0 +1,364 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#WD <- setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+#setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+#WD <- ("C:/Users/Ebert/Desktop/Data for R anslysis")
+#setwd("C:/Users/Ebert/Desktop/Data for R anslysis")
+WD <- ("/Volumes/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+setwd("/Volumes/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+#WD <- setwd("/Volumes/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+#setwd("/Volumes/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+```
+
+
+```{r}
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(dplyr)
+```
+
+
+
+```{r Read in Data}
+#load data
+#setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+Path <- WD
+list.files(Path)
+project_info<- read.delim("Project_SampleAnnotation.txt")
+genname<- read.delim("Simon_blood_reseq.gene_names.txt")
+dge_list<-readRDS("Simon_blood_reseq.dgecounts.rds")
+ex_counts<-as.matrix(dge_list$umicount$inex$all)
+#Priject info only HFD and msR4M-L1
+project_info <- project_info %>%
+  filter(Condition %in% c("HFD", "HFD+L1"))
+
+
+ex_counts<-ex_counts[,colnames(ex_counts)%in%project_info$BC]
+#ex_counts <- as.data.frame(ex_counts)
+
+#ex_counts <- ex_counts %>%
+  #tibble::rownames_to_column(var = "gene_id")
+
+#merged_table <- merge(ex_counts, genname, by = "gene_id", all.x = TRUE)
+
+UMI <- project_info[ , c("BC")]
+
+all_columns_numeric <- all(sapply(ex_counts, is.numeric))
+
+#write.table(merged_table, file = "merged_table.txt", sep = "\t", row.names = FALSE)
+
+```
+
+```{r}
+ex_counts_df <- as.data.frame(ex_counts)
+ex_counts_df <- rownames_to_column(ex_counts_df, "gene_id")
+ex_counts_df <- merge(x = ex_counts_df, y = genname, by = "gene_id", all.x = TRUE)
+ex_counts_df <- ex_counts_df %>% distinct(gene_name, .keep_all = TRUE)
+
+# Set gene_names as row names
+rownames(ex_counts_df) <- ex_counts_df$gene_name
+
+# Remove the gene_names column
+ex_counts_df <- ex_counts_df[, -which(names(ex_counts_df) == "gene_name")]
+ex_counts_df <- ex_counts_df[, -which(names(ex_counts_df) == "gene_id")]
+
+ex_counts <- as.matrix(ex_counts_df)
+```
+
+```{r}
+dim(ex_counts)
+head((ex_counts))
+```
+
+```{r}
+high_CNT <- tibble( gene_name = rownames(ex_counts),
+tot_cnt = rowSums(ex_counts),
+percent = tot_cnt/sum(ex_counts)*100) %>%
+arrange(desc(percent))
+
+head(high_CNT)
+```
+
+```{r}
+library(plyranges)
+library(rtracklayer)
+gtf <- read_gff("gencode.vM10.primary_assembly.annotation_extra.gtf")
+table(gtf$type)
+```
+
+```{r}
+all_genes <- gtf %>% filter( type =="gene") %>% as_tibble
+mitochondrial_genes <- all_genes %>%
+filter(seqnames == "chrM") %>%
+pull(gene_name)
+rrna_genes <- all_genes %>%
+  filter(gene_type %in% c("rRNA", "rRNA_pseudogene") | 
+           grepl("^Hbb", gene_name) | gene_name == "CT010467.1") %>%
+  pull(gene_name)
+```
+
+```{r}
+colSums(ex_counts>=1)
+```
+
+```{r}
+inf <- project_info
+cases <- inf %>% filter(Condition == "HFD+L1") %>% pull(BC)
+controls<-inf %>% filter(Condition == "HFD") %>% pull(BC)
+```
+
+```{r}
+cnt_select<- apply( ex_counts>=1, 1,
+function(x){ sum(x[cases]) >= 3 |
+sum(x[controls] >= 3 )} )
+expressed_genes<- rownames(ex_counts)[cnt_select]
+```
+
+```{r}
+keep_genes<- setdiff( expressed_genes,
+c(high_CNT$gene_name[1:10], mitochondrial_genes, rrna_genes))
+cnt.filt <- ex_counts[keep_genes,]
+dim(cnt.filt)
+```
+
+```{r}
+glimpse(inf)
+```
+
+```{r}
+inf <- data.frame(inf)# (DESeq does not like tibbles)
+# make sure that the ids in the info table have
+# the same order as the columns in the count table
+rownames(inf)<-inf$BC
+inf<-inf[colnames(cnt.filt),]
+colnames(cnt.filt)==rownames(inf)
+```
+
+```{r}
+
+dds <- DESeqDataSetFromMatrix(countData = cnt.filt, colData = inf, design = ~ Condition)
+
+dds <- DESeq(dds)
+dds <- estimateSizeFactors(dds)
+summary(sizeFactors(dds))
+dds<-estimateDispersions(dds)
+glimpse(colData(dds))
+plotDispEsts(dds)
+
+saveRDS(dds,file="dds.rds")
+
+```
+
+```{r}
+vsd <- varianceStabilizingTransformation( dds )
+# extract a matrix of normalized counts from the S4 object vsd
+vsdMat <- assay(vsd)
+```
+
+```{r}
+library(vsn)
+vsn::meanSdPlot(vsdMat)
+#Note this creates only the right-most plot
+```
+```{r}
+#load my pca function
+nUMIS <- colSums(ex_counts, na.rm = T)
+inf$nUMIs <- nUMIS
+source("pcafunction.R")
+pcaFunction(vsdMat, inf, col="Condition", label = "Sample_ID")+theme(legend.position = "top")
+pcaFunction(vsdMat, inf, col = "nUMIs", label = "Sample_ID")+
+theme(legend.position = "top")+
+scale_color_viridis_b()+geom_point(alpha=1)
+```
+
+
+```{r}
+library("variancePartition")
+form <- ~ Condition
+varPart <- fitExtractVarPartModel(vsdMat, form, inf)
+vp <- sortCols(varPart) #ordering the properties according to effect size
+plotVarPart(vp)+coord_flip()
+# Look at the 10 genes for which most of the variance could be explained by sample properties
+vp <- vp[order(vp$Residuals), ]
+plotPercentBars(vp[1:10, ])
+```
+```{r}
+library(ComplexHeatmap)
+genes_avail <- rownames(vsdMat)
+
+
+desired_prefixes <- c('Ccl', 'Cxcl', 'Cd', 'Mif', 'Ifn', 'Ddt', 'Tnf', 'Il')
+desired_prefixes <- c( "Mif", "Ddt", "Il")
+filtered_genes <- genes_avail[grep(paste(desired_prefixes, collapse="|"), genes_avail)]
+
+print(filtered_genes)
+
+markers <- filtered_genes
+
+all_markers_present <- all(markers %in% rownames(vsdMat))
+
+if (all_markers_present) {
+  print("All markers are present in row names of vsdMat.")
+} else {
+  print("Some markers are missing in row names of vsdMat.")
+}
+
+
+#subset Matrix for brain cell type markers
+mm<- intersect(rownames(vsdMat) , markers)
+mat<- vsdMat[mm,]
+#subset marker gene list
+#markers2<-markers[mm,]
+#scale genes to have mean 0
+mat_scale<-t(apply(mat,1,scale))
+cond<-inf$Condition
+cond <- sort(cond)
+ha<-HeatmapAnnotation(df=data.frame(cond),
+col = list( cond=c("HFD+L1"="red",
+"HFD"="green")))
+Heatmap( mat_scale,
+clustering_method_rows = "average",
+clustering_method_columns = "average",
+clustering_distance_rows = "euclidean",
+clustering_distance_columns = "euclidean",
+cluster_rows = T,
+cluster_columns = F,
+show_row_dend = F,
+gap=unit(15,"mm"),
+show_row_names = T,
+show_column_names = T,
+top_annotation = ha)
+
+
+```
+```{r}
+dds2 <- DESeq(dds)
+res <- results(dds2)
+summary(res)
+```
+```{r}
+res
+```
+
+
+```{r}
+#Plot volcano and GO
+library(EnhancedVolcano)
+library(ggplot2)
+library(ggbreak)
+library(svglite)
+#df <- data.frame(results(dds, contrast = c("Condition", "HFD.L1", "HFD")))
+#head(df)
+df <- res
+# Assuming df is your DataFrame and 'gene_column' is the column containing gene names
+gene_column <- rownames(df)  # Replace with your actual column name
+
+filtered_df <- df[!(
+  grepl("^Gm", rownames(df)) | 
+  grepl("^Rik$", rownames(df)) | 
+  grepl("^Rpl", rownames(df)) |
+  grepl("^Rps", rownames(df))
+), ]
+
+# Now, filtered_df contains the DataFrame with genes removed
+filtered_df
+
+y_limits <- c(0, 2)
+#x_limits <- c(-10, 10)
+
+p1<-EnhancedVolcano(filtered_df,
+                    lab = rownames(filtered_df),       
+                    x = 'log2FoldChange',
+                    y = 'padj',
+                    title = "DEG in blood HFD+msR4M-L1 vs. HFD+vehicle",
+                    subtitle="",
+                    pCutoff = 0.05,
+                    #selectLab = c("Timp1","Mmp12", "Ccl2","Ccl3", "Ccl5", "Ccl6"), #Lable the genes of interest
+                    FCcutoff = 1,
+                    max.overlaps = 10,
+                    cutoffLineType = "blank",
+                    axisLabSize = 12,
+                    titleLabSize = 12,
+                    subtitleLabSize = 12,
+                    captionLabSize = 12,
+                    legendLabSize = 12,
+                    ylab = bquote(~-Log[10] ~ (P.adjust)),
+                    col=c('grey1', 'grey1', 'grey1', 'red1'),
+                    #xlim = c(-10, 10),
+                    xlab="Log2fold change (HFD+msR4M-L1/HFD+vehicle)",
+                    pointSize = 2,
+                    labSize = 5,
+                    caption =  "logFC > |1|, p.adj < 0.1",
+                    drawConnectors = TRUE,
+                    widthConnectors = 0.5)+
+  coord_cartesian(ylim = y_limits)
+
+
+
+show(p1)
+ggsave("volcano_HFD_L1vsHFD_blood.pdf", width = 6, height = 7)
+```
+
+```{r}
+# Load necessary libraries
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+dds <- dds2
+# Extract normalized counts from the DESeq2 object
+normalized_counts <- counts(dds, normalized=TRUE)
+
+# Filter for genes of interest
+genes_of_interest <- grep("^Ccl|^Cxcl|^Mif|^Stat|^Il|^Timp|^Ifn", rownames(normalized_counts), value = TRUE)
+filtered_counts <- normalized_counts[genes_of_interest, ]
+
+# Convert to a data frame for easier manipulation
+df <- as.data.frame(t(filtered_counts))
+df$Condition <- colData(dds)$Condition  # Add condition information
+
+# Reshape the data for ggplot2
+df_long <- df %>%
+  pivot_longer(cols = -Condition, names_to = "gene", values_to = "count")
+
+# Generate the boxplot
+ggplot(df_long, aes(x = gene, y = count, fill = Condition)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Normalized Counts of Genes Starting with 'Ccl', 'Cxcl', and 'Mif'",
+       x = "Gene",
+       y = "Normalized Count")
+
+# Perform t-tests for each gene
+# Perform t-tests for each gene
+t_test_results <- df_long %>%
+  group_by(gene) %>%
+  summarise(p_value = t.test(count ~ Condition)$p.value) #%>%
+  #filter(p_value < 0.05)  # Filter for p-values less than 0.05
+
+# Apply BH correction to the p-values
+t_test_results <- t_test_results %>%
+  mutate(adjusted_p_value = p.adjust(p_value, method = "BH")) #%>%
+  #filter(adjusted_p_value < 0.05)  # Filter for adjusted p-values less than 0.05
+
+print(t_test_results)
+
+# Generate the boxplot only for significant genes
+significant_genes <- t_test_results$gene
+df_long_significant <- df_long %>%
+  filter(gene %in% significant_genes)
+
+ggplot(df_long_significant, aes(x = gene, y = count, fill = Condition)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Normalized Counts of Significant Genes (p < 0.05)",
+       x = "Gene",
+       y = "Normalized Count")
+
+```
+
