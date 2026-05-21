@@ -1,0 +1,595 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#WD <- setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+#setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+WD <- ("/Users/sebert/Documents/BulkRNAseq_Temp/BulkRNAseq/LN-L1")
+setwd("/Users/sebert/Documents/BulkRNAseq_Temp/BulkRNAseq/LN-L1")
+
+```
+
+
+```{r}
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(dplyr)
+```
+
+
+
+```{r Read in Data}
+#load data
+#setwd("//isdsyn1-1.isd.med.uni-muenchen.de/BD-Bernhagen/Simon Ebert/Prime-Seq_Simon_blood/Data for R anslysis")
+Path <- WD
+list.files(Path)
+project_info<- read.delim("SampleAnnotation.txt")
+genname<- read.delim("Simon_lymph.gene_names.txt")
+dge_list<-readRDS("Simon_lymph.dgecounts.rds")
+ex_counts<-as.matrix(dge_list$umicount$inex$all)
+#Priject info only HFD and msR4M-L1
+project_info <- project_info %>%
+  filter(Condition %in% c("HFD", "HFD + msR4M-L1 injectie"))
+
+#project_info <- project_info %>%
+# filter(!(Sample_ID %in% c("30","13","33", "27", "21", "7", "25", "23")))
+
+#project_info <- project_info %>%
+ #filter(!(Sample_ID %in% c("11","14","19")))
+
+#project_info <- project_info %>%
+ #filter(!(Sample_ID %in% c( "26","24","33", "25","5", "13")))
+#project_info <- project_info %>%
+ #filter(!(Sample_ID %in% sample_ids_in_range))
+
+ex_counts<-ex_counts[,colnames(ex_counts)%in%project_info$BC]
+#ex_counts <- as.data.frame(ex_counts)
+
+#ex_counts <- ex_counts %>%
+  #tibble::rownames_to_column(var = "gene_id")
+
+#merged_table <- merge(ex_counts, genname, by = "gene_id", all.x = TRUE)
+
+UMI <- project_info[ , c("BC")]
+
+all_columns_numeric <- all(sapply(ex_counts, is.numeric))
+
+#write.table(merged_table, file = "merged_table.txt", sep = "\t", row.names = FALSE)
+
+```
+
+```{r}
+ex_counts_df <- as.data.frame(ex_counts)
+ex_counts_df <- rownames_to_column(ex_counts_df, "gene_id")
+ex_counts_df <- merge(x = ex_counts_df, y = genname, by = "gene_id", all.x = TRUE)
+ex_counts_df <- ex_counts_df %>% distinct(gene_name, .keep_all = TRUE)
+
+# Set gene_names as row names
+rownames(ex_counts_df) <- ex_counts_df$gene_name
+
+# Remove the gene_names column
+ex_counts_df <- ex_counts_df[, -which(names(ex_counts_df) == "gene_name")]
+ex_counts_df <- ex_counts_df[, -which(names(ex_counts_df) == "gene_id")]
+
+ex_counts <- as.matrix(ex_counts_df)
+```
+
+```{r}
+dim(ex_counts)
+head((ex_counts))
+```
+
+```{r}
+high_CNT <- tibble( gene_name = rownames(ex_counts),
+tot_cnt = rowSums(ex_counts),
+percent = tot_cnt/sum(ex_counts)*100) %>%
+arrange(desc(percent))
+
+head(high_CNT)
+```
+
+```{r}
+library(plyranges)
+library(rtracklayer)
+gtf <- read_gff("gencode.vM10.primary_assembly.annotation_extra.gtf")
+table(gtf$type)
+```
+
+```{r}
+all_genes <- gtf %>% filter( type =="gene") %>% as_tibble
+mitochondrial_genes <- all_genes %>%
+filter(seqnames == "chrM") %>%
+pull(gene_name)
+rrna_genes <- all_genes %>%
+  filter(gene_type %in% c("rRNA", "rRNA_pseudogene") ) %>%
+          #grepl("^Hbb", gene_name) |grepl("^Rpl", gene_name) |grepl("^Gm", gene_name) |grepl("^Rps", gene_name) |grepl("Rik$", gene_name)) %>%
+  pull(gene_name)
+
+protein_coding_genes <- all_genes %>%
+  filter(gene_type == "protein_coding")%>%
+          #grepl("^Hbb", gene_name) |grepl("^Rpl", gene_name) |grepl("^Gm", gene_name) |grepl("^Rps", gene_name) |grepl("Rik$", gene_name)) %>%
+  pull(gene_name)
+```
+
+```{r}
+colSums(ex_counts>=1)
+```
+
+```{r}
+inf <- project_info
+cases <- inf %>% filter(Condition == "HFD + msR4M-L1 injectie") %>% pull(BC)
+controls<-inf %>% filter(Condition == "HFD") %>% pull(BC)
+```
+
+```{r}
+cnt_select<- apply( ex_counts>=1, 1,
+function(x){ sum(x[cases]) >= 3 |
+sum(x[controls] >= 3 )} )
+expressed_genes<- rownames(ex_counts)[cnt_select]
+```
+```{r}
+library(dplyr)
+
+# Assuming all necessary data has been defined
+# expressed_genes: vector of all expressed gene names
+# high_CNT: data frame with high count genes
+# mitochondrial_genes: vector of mitochondrial gene names
+# rrna_genes: vector of rRNA gene names
+# protein_coding_genes: vector of protein-coding gene names
+# ex_counts: data frame of expression counts with gene names as row names
+
+# Define the genes to keep by excluding unwanted types and retaining protein_coding
+keep_genes <- setdiff(
+  expressed_genes,
+  c(high_CNT$gene_name[1:10], mitochondrial_genes, rrna_genes)
+)
+
+# Further filter keep_genes to include only protein_coding genes
+keep_genes <- intersect(keep_genes, protein_coding_genes)
+
+# Filter the ex_counts data frame to retain only these genes
+cnt.filt <- ex_counts[rownames(ex_counts) %in% keep_genes, ]
+
+# Print or save the filtered data frame
+print(cnt.filt)
+# write.csv(cnt.filt, 'filtered_ex_counts.csv', row.names = TRUE)
+dim(cnt.filt)
+```
+
+
+```{r}
+#keep_genes<- setdiff( expressed_genes,
+#c(high_CNT$gene_name[1:10], mitochondrial_genes, rrna_genes,protein_coding_genes))
+#cnt.filt <- ex_counts[keep_genes,]
+#keep_genes<- setdiff( expressed_genes,
+#c(high_CNT$gene_name[1:10]))
+#cnt.filt <- ex_counts[keep_genes,]
+#dim(cnt.filt)
+```
+
+```{r}
+glimpse(inf)
+```
+
+```{r}
+inf <- data.frame(inf)# (DESeq does not like tibbles)
+# make sure that the ids in the info table have
+# the same order as the columns in the count table
+rownames(inf)<-inf$BC
+inf<-inf[colnames(cnt.filt),]
+colnames(cnt.filt)==rownames(inf)
+```
+```{r}
+#only inflammation
+
+
+# library(biomaRt)
+# library(KEGGREST)
+# 
+# # Step 2: Retrieve inflammation-associated genes from the Gene Ontology database
+# ensembl <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")  # Use mouse genes
+# 
+# go_inflammation_genes <- getBM(
+#   attributes = c('external_gene_name', 'go_id', 'name_1006'),
+#   filters = 'go',
+#   values = 'GO:0006954',  # GO term for inflammatory response
+#   mart = ensembl
+# )
+# 
+# # Extract the gene names
+# go_genes <- unique(go_inflammation_genes$external_gene_name)
+# 
+# # Step 3: Retrieve inflammation-associated genes from the KEGG pathway database
+# # Example KEGG pathway IDs related to inflammation
+# kegg_pathways <- c("mmu04064", "mmu04668")  # Add more relevant pathways as needed
+# 
+# kegg_genes <- unique(unlist(sapply(kegg_pathways, function(pathway) {
+#   pathway_info <- keggGet(pathway)[[1]]
+#   genes <- pathway_info$GENE
+#   gene_names <- sapply(strsplit(genes, ";"), `[`, 1)
+#   gene_names
+# })))
+# 
+# # Step 4: Combine the gene lists and remove duplicates
+# all_inflammation_genes <- unique(c(go_genes, kegg_genes))
+# 
+# # Display the combined list of inflammation-associated genes
+# head(all_inflammation_genes)
+# length(all_inflammation_genes)  # To check the number of unique genes
+
+
+
+
+```
+```{r}
+# Subset the cnt.filt matrix to keep only the rows corresponding to all_inflammation_genes
+#cnt.filt <- cnt.filt[rownames(cnt.filt) %in% all_inflammation_genes, ]
+
+```
+
+
+```{r}
+
+dds <- DESeqDataSetFromMatrix(countData = cnt.filt, colData = inf, design = ~ Condition)
+
+dds <- DESeq(dds)
+dds <- estimateSizeFactors(dds)
+summary(sizeFactors(dds))
+dds<-estimateDispersions(dds)
+glimpse(colData(dds))
+plotDispEsts(dds)
+
+saveRDS(dds,file="dds.rds")
+
+```
+
+```{r}
+vsd <- varianceStabilizingTransformation( dds )
+# extract a matrix of normalized counts from the S4 object vsd
+vsdMat <- assay(vsd)
+```
+
+```{r}
+library(vsn)
+vsn::meanSdPlot(vsdMat)
+#Note this creates only the right-most plot
+```
+```{r}
+#load my pca function
+nUMIS <- colSums(ex_counts, na.rm = T)
+inf$nUMIs <- nUMIS
+source("pcafunction.R")
+pcaFunction(vsdMat, inf, col="Condition", label = "Sample_ID")+theme(legend.position = "top")
+pcaFunction(vsdMat, inf, col = "nUMIs", label = "Condition")+
+theme(legend.position = "top")+
+scale_color_viridis_b()+geom_point(alpha=1)
+```
+```{r}
+# Step 1: Calculate the mean and standard deviation of the nUmis column
+mean_nUmis <- mean(inf$nUMIs, na.rm = TRUE)
+sd_nUmis <- sd(inf$nUMIs, na.rm = TRUE)
+
+# Step 2: Define the range of mean ± standard deviation
+lower_bound <- mean_nUmis - sd_nUmis
+upper_bound <- mean_nUmis + sd_nUmis
+
+# Step 3: Filter the rows within the range
+filtered_inf <- inf[inf$nUMIs >= lower_bound & inf$nUMIs <= upper_bound, ]
+
+# Step 4: Extract and display the Sample_ID for these rows
+sample_ids_in_range <- filtered_inf$Sample_ID
+print(sample_ids_in_range)
+
+```
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+
+# Assuming you have a DESeq2 object called `dds`
+# Step 1: Transform data using vst or rlog
+vsd <- vst(dds, blind = FALSE)  # or use rlog(dds, blind = FALSE)
+
+# Step 2: Perform PCA and extract PC1 and PC2 scores
+pca_res <- prcomp(t(assay(vsd)), scale. = TRUE)
+
+# Extract PC1 and PC2 scores
+scores <- as.data.frame(pca_res$x[, 1:2])
+
+# Add sample names and group labels
+scores$sample <- rownames(scores)
+scores$Condition <- colData(vsd)$Condition
+
+# Step 3: Calculate the Euclidean distance from the median for each condition
+# Group by condition and calculate the centroids (medians) for PC1 and PC2 within each condition
+library(dplyr)
+
+centroids <- scores %>%
+  group_by(Condition) %>%
+  summarise(PC1_median = median(PC1), PC2_median = median(PC2))
+
+# Merge centroids back to the scores data frame
+scores <- merge(scores, centroids, by = "Condition")
+
+# Compute Euclidean distance from the group's centroid for each sample
+scores$distance <- apply(scores[, c("PC1", "PC2", "PC1_median", "PC2_median")], 1, function(row) {
+  sqrt(sum((row[1:2] - row[3:4])^2))
+})
+
+# Step 4: Calculate MAD and identify outliers within each condition
+scores <- scores %>%
+  group_by(Condition) %>%
+  mutate(
+    mad_distance = mad(distance),  # Calculate MAD within each group
+    mad_threshold = 3 * mad_distance,  # Define outlier threshold as 3 * MAD
+    outlier = distance > (median(distance) + mad_threshold)  # Identify outliers within each group
+  )
+
+# Print identified outliers
+outliers <- scores[scores$outlier == TRUE, ]
+print(outliers)
+
+# Step 5: Visualize the PCA plot with outliers highlighted
+ggplot(scores, aes(PC1, PC2, color = Condition)) +
+  geom_point(size = 3) +
+  geom_text_repel(data = scores[scores$outlier == TRUE, ], aes(label = sample), size = 3, color = "red") +
+  # Add centroids for each condition
+  geom_point(aes(x = PC1_median, y = PC2_median), color = "black", size = 4, shape = 8) +
+  geom_text(aes(x = PC1_median, y = PC2_median, label = Condition), vjust = -1, hjust = 0.5, color = "black") +
+  xlab(paste0("PC1: ", round(100 * pca_res$sdev[1]^2 / sum(pca_res$sdev^2), 2), "% variance")) +
+  ylab(paste0("PC2: ", round(100 * pca_res$sdev[2]^2 / sum(pca_res$sdev^2), 2), "% variance")) +
+  coord_fixed() +
+  theme_minimal() +
+  ggtitle("PCA of RNA-seq Data with Outliers Detected by MAD for Each Condition")
+
+# Step 6: Remove outliers from DESeq2 object (optional)
+dds_clean <- dds[, !colnames(dds) %in% outliers$sample]
+
+
+
+
+```
+```{r}
+dds <- dds_clean
+```
+
+
+```{r}
+library("variancePartition")
+form <- ~ Condition + Batch
+varPart <- fitExtractVarPartModel(vsdMat, form, inf)
+vp <- sortCols(varPart) #ordering the properties according to effect size
+plotVarPart(vp)+coord_flip()
+# Look at the 10 genes for which most of the variance could be explained by sample properties
+vp <- vp[order(vp$Residuals), ]
+plotPercentBars(vp[1:10, ])
+```
+
+```{r}
+
+#dds <- DESeqDataSetFromMatrix(countData = cnt.filt, colData = inf, design = ~ Condition)
+design(dds) <- ~ Condition + Batch
+dds <- DESeq(dds)
+res <- results(dds)
+results <- res
+summary(res)
+DESeq2::plotMA(results(dds, contrast = c("Condition", "HFD + msR4M-L1 injectie", "HFD")))
+
+pdf("MAplot_HFD_vs_HFD_msR4M-L1.pdf", width = 7, height = 5)  # adjust size as needed
+DESeq2::plotMA(results(dds, contrast = c("Condition", "HFD + msR4M-L1 injectie", "HFD")))
+dev.off()
+
+```
+```{r}
+#Plot volcano and GO
+library(EnhancedVolcano)
+library(ggplot2)
+library(ggbreak)
+library(svglite)
+df <- data.frame(results(dds, contrast = c("Condition", "HFD + msR4M-L1 injectie", "HFD")))
+head(df)
+# Assuming df is your DataFrame and 'gene_column' is the column containing gene names
+gene_column <- rownames(df)  # Replace with your actual column name
+
+filtered_df <- df[!(
+  grepl("^Gm", rownames(df)) | 
+  grepl("^Rik$", rownames(df)) | 
+  grepl("^Rpl", rownames(df)) |
+  grepl("^Rps", rownames(df))
+), ]
+
+# Now, filtered_df contains the DataFrame with genes removed
+filtered_df
+
+y_limits <- c(0, 2)
+#x_limits <- c(-10, 10)
+
+p1<-EnhancedVolcano(filtered_df,
+                    lab = rownames(filtered_df),       
+                    x = 'log2FoldChange',
+                    y = 'padj',
+                    title = "DEG in lymph nodes HFD+msR4M-L1 vs. HFD+vehicle",
+                    subtitle="",
+                    pCutoff = 0.05,
+                    #selectLab = c("Timp1","Mmp12", "Ccl2","Ccl3", "Ccl5", "Ccl6"), #Lable the genes of interest
+                    FCcutoff = 1,
+                    max.overlaps = 10,
+                    cutoffLineType = "blank",
+                    axisLabSize = 12,
+                    titleLabSize = 12,
+                    subtitleLabSize = 12,
+                    captionLabSize = 12,
+                    legendLabSize = 12,
+                    ylab = bquote(~-Log[10] ~ (P.adjust)),
+                    col=c('grey1', 'grey1', 'grey1', 'red1'),
+                    #xlim = c(-10, 10),
+                    xlab="Log2fold change (HFD+msR4M-L1/HFD+vehicle)",
+                    pointSize = 2,
+                    labSize = 5,
+                    caption =  "logFC > |1|, p.adj < 0.05",
+                    drawConnectors = TRUE,
+                    widthConnectors = 0.5)+
+  coord_cartesian(ylim = y_limits)
+
+
+
+show(p1)
+ggsave("volcano_HFDvsChow_LN.pdf", width = 6, height = 7)
+```
+```{r}
+##Perform GO
+library(openxlsx)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+library(ggplot2)
+
+
+
+
+df_down <- rownames(df[df$log2FoldChange < -0.5 & df$padj < 0.05,])
+
+GO_results_down <- enrichGO(gene = df_down, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "BP")
+#GO_results_down <- as.data.frame(GO_results_down)
+
+# Use dotplot for lollipop plot
+dotplot(GO_results_down, showCategory = 15, title = "GO BP terms down in HFD mice", font.size = 12)
+ggsave("go_down_HMvsH.svg", width = 8, height = 6)
+head(GO_results_down)
+
+GO_results_down <- GO_results_down[order(GO_results_down$'p.adjust', decreasing = F),]
+write.xlsx(GO_results_down, "GO_down_in_HMvsH.xlsx")
+
+df_up <- rownames(df[df$log2FoldChange > 0.5 & df$padj < 0.05,])
+GO_results_up <- enrichGO(gene = df_up, OrgDb = "org.Mm.eg.db", keyType = "SYMBOL", ont = "BP")
+#as.data.frame(GO_results_up)
+
+# Use dotplot for lollipop plot
+dotplot(GO_results_up, showCategory = 15, title ="GO BP terms up in HFD mice", font.size = 12)
+ggsave("go_up_HMvsH.svg", width = 8, height = 6)
+
+GO_results_up <- GO_results_up[order(GO_results_up$'p.adjust', decreasing = F),]
+write.xlsx(GO_results_up, "GO_up_in_HMvsH.xlsx")
+```
+
+
+
+
+```{r}
+# Load necessary libraries
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Extract normalized counts from the DESeq2 object
+normalized_counts <- counts(dds, normalized=TRUE)
+##
+library(org.Mm.eg.db)
+library(GO.db)
+library(AnnotationDbi)
+
+# Define the GO term for inflammatory response (GO:0006954)
+inflammatory_go_term <- "GO:0006954"
+
+# Get all genes (Entrez IDs) associated with the inflammatory response GO term
+inflammatory_genes <- unique(unlist(AnnotationDbi::mget(inflammatory_go_term, org.Mm.egGO2ALLEGS)))
+
+# Map the Entrez gene IDs to gene symbols (mouse genes)
+inflammatory_gene_symbols <- unique(unlist(AnnotationDbi::mget(inflammatory_genes, org.Mm.egSYMBOL)))
+
+# Filter the normalized counts for inflammatory genes
+genes_of_interest <- rownames(normalized_counts)[rownames(normalized_counts) %in% inflammatory_gene_symbols]
+
+# Output the list of inflammatory genes found in the normalized counts
+genes_of_interest
+
+###
+# Filter for genes of interest
+#genes_of_interest <- grep("^Ccl|^Cxcl|^Mif|^Il|^Ddt|^Stat|^Ifn|^Tlr", rownames(normalized_counts), value = TRUE)
+#genes_of_interest <- grep("Stat1|Stat2|Ifnar1", rownames(normalized_counts), value = TRUE)
+filtered_counts <- normalized_counts[genes_of_interest, ]
+
+# Convert to a data frame for easier manipulation
+df <- as.data.frame(t(filtered_counts))
+df$Condition <- colData(dds)$Condition  # Add condition information
+
+# Reshape the data for ggplot2
+df_long <- df %>%
+  pivot_longer(cols = -Condition, names_to = "gene", values_to = "count")
+
+# Generate the boxplot
+ggplot(df_long, aes(x = gene, y = count, fill = Condition)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Normalized Counts of Genes Starting with 'Ccl', 'Cxcl', and 'Mif'",
+       x = "Gene",
+       y = "Normalized Count")
+
+ggsave("normalized_counts_plot.png", width = 16, height = 6)
+
+# Perform t-tests for each gene
+# Perform t-tests for each gene
+t_test_results <- df_long %>%
+  group_by(gene) %>%
+  summarise(p_value = t.test(count ~ Condition)$p.value) %>%
+  filter(p_value < 0.05)  # Filter for p-values less than 0.05
+
+# Apply BH correction to the p-values
+t_test_results <- t_test_results %>%
+  mutate(adjusted_p_value = p.adjust(p_value, method = "BH")) %>%
+  filter(adjusted_p_value < 0.05)  # Filter for adjusted p-values less than 0.05
+
+print(t_test_results)
+write.xlsx(t_test_results, "t_test_results.xlsx")
+
+# Generate the boxplot only for significant genes
+significant_genes <- t_test_results$gene
+df_long_significant <- df_long %>%
+  filter(gene %in% significant_genes)
+
+ggplot(df_long_significant, aes(x = gene, y = count, fill = Condition)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Normalized Counts of Significant Genes (p < 0.05)",
+       x = "Gene",
+       y = "Normalized Count") +
+   scale_y_log10()
+
+write.xlsx(df_long_significant, "sig_res.xlsx")
+
+```
+
+```{r}
+# Assuming df_long_significant is already filtered for significant genes
+df_long_filtered <- df_long_significant %>%
+  filter(gene %in% c("Ccl17", "Il2"))
+
+# Create the boxplot
+p <- ggplot(df_long_filtered, aes(x = gene, y = count, fill = Condition)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Normalized Counts of L1 injected mice",
+       x = "Gene",
+       y = "Normalized Counts")
+
+# Print the plot to display it
+print(p)
+
+# Save the plot to a file
+ggsave("normalized_counts_Ccl17_Il2_plot.png", plot = p, width = 6, height = 6)
+
+```
+
+```{r}
+plotCounts(dds,"Ccl17",intgroup = "Condition", normalized = T)
+plotCounts(dds,"Il2",intgroup = "Condition", normalized = T)
+```
+
+
+
+
